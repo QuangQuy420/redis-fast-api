@@ -64,36 +64,3 @@ REDIS_HOST=localhost
 REDIS_PORT=6379
 REDIS_DB=0
 ```
-
-
-Các lệnh Alembic thường dùng:                                                                                                              
-                                                                                                                                             
-  # Tạo migration (autogenerate từ model)                                                                                                    
-  alembic revision --autogenerate -m "add user table"                                                                                        
-                                                                                                                                             
-  # Tạo migration rỗng (viết tay)                                                                                                            
-  alembic revision -m "seed data"                           
-                                                                                                                                             
-  # Apply tất cả migration chưa chạy                                                                                                         
-  alembic upgrade head
-                                                                                                                                             
-  # Upgrade lên N bước                                                                                                                       
-  alembic upgrade +2
-                                                                                                                                             
-  # Rollback về migration trước đó                                                                                                           
-  alembic downgrade -1
-                                                                                                                                             
-  # Rollback về migration cụ thể (dùng revision ID)         
-  alembic downgrade 972064ed5a49
-                                                                                                                                             
-  # Rollback toàn bộ về trạng thái trống                                                                                                     
-  alembic downgrade base                                                                                                                     
-                                                                                                                                             
-  # Xem lịch sử migration                                   
-  alembic history
-
-  # Xem migration hiện tại DB đang ở                                                                                                         
-  alembic current
-                                                                                                                                             
-  # Xem SQL sẽ chạy mà không apply (dry run)                                                                                                 
-  alembic upgrade head --sql
