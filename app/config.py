@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     redis_port: int = 6379
     redis_db: int = 0
 
+    jwt_secret_key: str = "change-me-in-production"
+    jwt_expire_minutes: int = 30
+
     @property
     def database_url(self) -> str:
         return (

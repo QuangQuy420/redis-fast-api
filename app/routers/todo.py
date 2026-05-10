@@ -13,7 +13,7 @@ from app.models import Todo
 from app.redis_client import get_redis
 
 CACHE_TTL = 300      # seconds
-RATE_LIMIT = 60      # requests
+RATE_LIMIT = 5      # requests
 RATE_WINDOW = 60     # seconds
 
 

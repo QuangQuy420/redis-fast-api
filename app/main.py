@@ -6,7 +6,7 @@ from sqlalchemy import text
 
 from app.database import AsyncSessionLocal
 from app.redis_client import connect_redis, disconnect_redis, get_redis
-from app.routers import todo
+from app.routers import auth, todo
 
 
 @asynccontextmanager
@@ -32,6 +32,7 @@ async def timing_middleware(request: Request, call_next):
     return response
 
 
+app.include_router(auth.router)
 app.include_router(todo.router)
 
 
