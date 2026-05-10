@@ -1,8 +1,9 @@
 import json
+import time
 from datetime import datetime
 
 import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,9 +12,26 @@ from app.database import get_db
 from app.models import Todo
 from app.redis_client import get_redis
 
-router = APIRouter(prefix="/todos", tags=["todos"])
+CACHE_TTL = 300      # seconds
+RATE_LIMIT = 60      # requests
+RATE_WINDOW = 60     # seconds
 
-CACHE_TTL = 300  # seconds
+
+async def safe_redis(coro, default=None):
+    try:
+        return await coro
+    except Exception as e:
+        print(f"Redis error: {e}")
+        return default
+
+
+async def rate_limit(request: Request, redis: aioredis.Redis = Depends(get_redis)):
+    key = f"rate_limit:{request.client.host}"
+    count = await safe_redis(redis.incr(key))
+    if count == 1:
+        await safe_redis(redis.expire(key, RATE_WINDOW))
+    if count is not None and count > RATE_LIMIT:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Too many requests")
 
 
 # ---------- Schemas ----------
@@ -40,6 +58,9 @@ class TodoResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+router = APIRouter(prefix="/todos", tags=["todos"], dependencies=[Depends(rate_limit)])
+
+
 # ---------- Endpoints ----------
 
 @router.get("/", response_model=list[TodoResponse])
@@ -47,14 +68,26 @@ async def list_todos(
     db: AsyncSession = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis),
 ):
-    cached = await redis.get("todos:list")
-    if cached:
-        return [TodoResponse.model_validate_json(item) for item in json.loads(cached)]
+    t0 = time.perf_counter()
+    cached = await safe_redis(redis.get("todos:list"))
+    print(f"  Redis get: {(time.perf_counter() - t0) * 1000:.1f}ms")
 
+    if cached:
+        t1 = time.perf_counter()
+        result = [TodoResponse.model_validate_json(item) for item in json.loads(cached)]
+        print(f"  Deserialize cache: {(time.perf_counter() - t1) * 1000:.1f}ms")
+        return result
+
+    t1 = time.perf_counter()
     result = await db.execute(select(Todo).order_by(Todo.created_at.desc()))
     todos = result.scalars().all()
+    print(f"  DB query: {(time.perf_counter() - t1) * 1000:.1f}ms")
+
+    t2 = time.perf_counter()
     responses = [TodoResponse.model_validate(t) for t in todos]
-    await redis.setex("todos:list", CACHE_TTL, json.dumps([r.model_dump_json() for r in responses]))
+    await safe_redis(redis.setex("todos:list", CACHE_TTL, json.dumps([r.model_dump_json() for r in responses])))
+    print(f"  Serialize + Redis set: {(time.perf_counter() - t2) * 1000:.1f}ms")
+
     return responses
 
 
@@ -65,8 +98,9 @@ async def get_todo(
     redis: aioredis.Redis = Depends(get_redis),
 ):
     cache_key = f"todo:{todo_id}"
-    cached = await redis.get(cache_key)
+    cached = await safe_redis(redis.get(cache_key))
     if cached:
+        print(f"Cache hit for {cache_key}")
         return TodoResponse.model_validate_json(cached)
 
     todo = await db.get(Todo, todo_id)
@@ -74,7 +108,7 @@ async def get_todo(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Todo not found")
 
     response = TodoResponse.model_validate(todo)
-    await redis.setex(cache_key, CACHE_TTL, response.model_dump_json())
+    await safe_redis(redis.setex(cache_key, CACHE_TTL, response.model_dump_json()))
     return response
 
 
@@ -88,7 +122,7 @@ async def create_todo(
     db.add(todo)
     await db.commit()
     await db.refresh(todo)
-    await redis.delete("todos:list")
+    await safe_redis(redis.delete("todos:list"))
     return todo
 
 
@@ -108,7 +142,7 @@ async def update_todo(
 
     await db.commit()
     await db.refresh(todo)
-    await redis.delete(f"todo:{todo_id}", "todos:list")
+    await safe_redis(redis.delete(f"todo:{todo_id}", "todos:list"))
     return todo
 
 
@@ -123,4 +157,4 @@ async def delete_todo(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Todo not found")
     await db.delete(todo)
     await db.commit()
-    await redis.delete(f"todo:{todo_id}", "todos:list")
+    await safe_redis(redis.delete(f"todo:{todo_id}", "todos:list"))
