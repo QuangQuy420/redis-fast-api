@@ -1,5 +1,7 @@
+import json
 from datetime import datetime
 
+import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -7,8 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models import Todo
+from app.redis_client import get_redis
 
 router = APIRouter(prefix="/todos", tags=["todos"])
+
+CACHE_TTL = 300  # seconds
 
 
 # ---------- Schemas ----------
@@ -38,30 +43,62 @@ class TodoResponse(BaseModel):
 # ---------- Endpoints ----------
 
 @router.get("/", response_model=list[TodoResponse])
-async def list_todos(db: AsyncSession = Depends(get_db)):
+async def list_todos(
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+):
+    cached = await redis.get("todos:list")
+    if cached:
+        return [TodoResponse.model_validate_json(item) for item in json.loads(cached)]
+
     result = await db.execute(select(Todo).order_by(Todo.created_at.desc()))
-    return result.scalars().all()
+    todos = result.scalars().all()
+    responses = [TodoResponse.model_validate(t) for t in todos]
+    await redis.setex("todos:list", CACHE_TTL, json.dumps([r.model_dump_json() for r in responses]))
+    return responses
 
 
 @router.get("/{todo_id}", response_model=TodoResponse)
-async def get_todo(todo_id: int, db: AsyncSession = Depends(get_db)):
+async def get_todo(
+    todo_id: int,
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+):
+    cache_key = f"todo:{todo_id}"
+    cached = await redis.get(cache_key)
+    if cached:
+        return TodoResponse.model_validate_json(cached)
+
     todo = await db.get(Todo, todo_id)
     if not todo:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Todo not found")
-    return todo
+
+    response = TodoResponse.model_validate(todo)
+    await redis.setex(cache_key, CACHE_TTL, response.model_dump_json())
+    return response
 
 
 @router.post("/", response_model=TodoResponse, status_code=status.HTTP_201_CREATED)
-async def create_todo(body: TodoCreate, db: AsyncSession = Depends(get_db)):
+async def create_todo(
+    body: TodoCreate,
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+):
     todo = Todo(title=body.title, description=body.description)
     db.add(todo)
     await db.commit()
     await db.refresh(todo)
+    await redis.delete("todos:list")
     return todo
 
 
 @router.patch("/{todo_id}", response_model=TodoResponse)
-async def update_todo(todo_id: int, body: TodoUpdate, db: AsyncSession = Depends(get_db)):
+async def update_todo(
+    todo_id: int,
+    body: TodoUpdate,
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+):
     todo = await db.get(Todo, todo_id)
     if not todo:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Todo not found")
@@ -71,13 +108,19 @@ async def update_todo(todo_id: int, body: TodoUpdate, db: AsyncSession = Depends
 
     await db.commit()
     await db.refresh(todo)
+    await redis.delete(f"todo:{todo_id}", "todos:list")
     return todo
 
 
 @router.delete("/{todo_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_todo(todo_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_todo(
+    todo_id: int,
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+):
     todo = await db.get(Todo, todo_id)
     if not todo:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Todo not found")
     await db.delete(todo)
     await db.commit()
+    await redis.delete(f"todo:{todo_id}", "todos:list")

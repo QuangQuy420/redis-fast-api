@@ -15,6 +15,7 @@ async def connect_redis():
         settings.redis_url,
         encoding="utf-8",
         decode_responses=True,
+        max_connections=10,
     )
 
 
